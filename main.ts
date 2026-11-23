@@ -60,6 +60,30 @@ class Tree {
   get(p: string): string | null {
     return this.now.has(p) ? this.now.get(p)! : this.original(p);
   }
+  /** A directory at p: one on disk, or one the edits imply by placing a file under p. A directory is
+   *  not a file (get reads it as absent), but a creation there, or a move there, runs into it. */
+  isDir(p: string): boolean {
+    try {
+      if (statSync(p).isDirectory()) return true;
+    } catch {
+      // not on disk
+    }
+    const pre = `${p}/`;
+    for (const [k, v] of this.now) if (v !== null && k.startsWith(pre)) return true;
+    return false;
+  }
+  /** A file sitting where a parent directory of p would have to be, in the tree as the edits leave it. */
+  parentIsFile(p: string): boolean {
+    for (let i = p.indexOf('/'); i > 0; i = p.indexOf('/', i + 1)) {
+      if (this.get(p.slice(0, i)) !== null) return true;
+    }
+    return false;
+  }
+  /** What a creation at p, or a move to p, runs into: a file at p, a directory at p, or a file in
+   *  place of one of p's parent directories. Any of them is the spec's `exists` for that edit. */
+  createBlocked(p: string): boolean {
+    return this.get(p) !== null || this.isDir(p) || this.parentIsFile(p);
+  }
 }
 
 type Edit = (tree: Tree) => void;
@@ -91,7 +115,7 @@ function jsonEdit(v: unknown): Edit | null {
     const text = o.file_text;
     return (tree) => {
       if (!safe(p)) throw new Fail('unsafe', p);
-      if (tree.get(p) !== null) throw new Fail('exists', p);
+      if (tree.createBlocked(p)) throw new Fail('exists', p);
       tree.now.set(p, text);
     };
   }
@@ -342,7 +366,7 @@ function applySection(tree: Tree, s: Section, oldPath: string | null, newPath: s
   if (newPath !== null && !safe(newPath)) throw new Fail('unsafe', newPath);
   if (create) {
     if (newPath === null) throw new Fail('unsafe', '');
-    if (tree.get(newPath) !== null) throw new Fail('exists', newPath);
+    if (tree.createBlocked(newPath)) throw new Fail('exists', newPath);
     const out: string[] = [];
     let lastPlus: { body: BodyLine[]; idx: number } | null = null;
     for (const h of s.hunks) {
@@ -366,7 +390,7 @@ function applySection(tree: Tree, s: Section, oldPath: string | null, newPath: s
   const p = oldPath!;
   const before = tree.get(p);
   if (before === null) throw new Fail('missing', p);
-  if (newPath !== null && newPath !== p && tree.get(newPath) !== null) throw new Fail('exists', newPath);
+  if (newPath !== null && newPath !== p && tree.createBlocked(newPath)) throw new Fail('exists', newPath);
   const model = splitFile(before);
   let d = 0;
   for (const h of s.hunks) {
@@ -544,7 +568,7 @@ function srEdits(lines: string[], strict: boolean): Edit[] {
   return blocks.map((b) => (tree: Tree) => {
     if (!safe(b.path)) throw new Fail('unsafe', b.path);
     if (b.old.length === 0) {
-      if (tree.get(b.path) !== null) throw new Fail('exists', b.path);
+      if (tree.createBlocked(b.path)) throw new Fail('exists', b.path);
       tree.now.set(b.path, b.add.length === 0 ? '' : b.add.join('\n') + '\n');
       return;
     }
@@ -574,7 +598,7 @@ function applyUpdate(tree: Tree, p: string, moveTo: string | null, chunks: Chunk
   if (moveTo !== null && !safe(moveTo)) throw new Fail('unsafe', moveTo);
   const before = tree.get(p);
   if (before === null) throw new Fail('missing', p);
-  if (moveTo !== null && tree.get(moveTo) !== null) throw new Fail('exists', moveTo);
+  if (moveTo !== null && tree.createBlocked(moveTo)) throw new Fail('exists', moveTo);
   const model = splitFile(before);
   let cursor = 0;
   for (const chunk of chunks) {
@@ -664,7 +688,7 @@ function v4aEdits(lines: string[], strict: boolean): Edit[] {
       const p = head.path;
       edits.push((tree: Tree) => {
         if (!safe(p)) throw new Fail('unsafe', p);
-        if (tree.get(p) !== null) throw new Fail('exists', p);
+        if (tree.createBlocked(p)) throw new Fail('exists', p);
         tree.now.set(p, fileLines.length === 0 ? '' : fileLines.join('\n') + '\n');
       });
     } else if (head.kind === 'del') {
